@@ -207,12 +207,37 @@ session.query(User).filter(User.name.match('wendy'))
 # ### Returning Lists and Scalars
 # all() - list
 query = session.query(User).filter(User.name.like('%ed')).order_by(User.id)
-query.all()
+print(query.all())
 
 # first() - one
-query.first()
+print(query.first())
+
 
 # one()
-# fully fetches all rows,
-user = query.one()
+# 按请求条件获取所有行, 如果行不唯一 or 返回数组(?) or 为空, 报错
+def test_one():
+    user = query.one()
 
+
+# one_or_none()
+# 与one()类似(返回多行时报错), 但是为空时不报错, 返回None
+def test_one_or_none():
+    user = query.one_or_none()
+
+
+# scalar()
+# 先调用one()方法, 成功后返回行的第一列值
+query = session.query(User.id).filter(User.name == 'ed').order_by(User.id)
+print(query.scalar())  # 1
+
+# ### Using Textual SQL
+from sqlalchemy import text
+
+for user in session.query(User). \
+        filter(text('id<224')). \
+        order_by(text('id')).all():
+    print(user.name)
+
+res = session.query(User).filter(text('id<:value and name=:name')). \
+    params(value=224, name='fred').order_by(User.id).one()
+print(res)
