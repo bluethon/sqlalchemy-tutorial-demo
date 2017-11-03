@@ -45,7 +45,7 @@ print('=== User table')
 print(User.__table__)
 
 print('=== Base create all')
-print(Base.metadata.create_all(engine))
+Base.metadata.create_all(engine)
 
 ed_user = User(name='ed', fullname='Ed Jones', password='edspassword')
 
@@ -120,7 +120,7 @@ print(fake_user in session)
 print('=== users2')
 print(session.query(User).filter(User.name.in_(['Edwardo', 'fakeuser'])).all())
 
-# === Querying
+# --- Querying
 for instance in session.query(User).order_by(User.id):
     print(instance.name, instance.fullname)
 
@@ -241,3 +241,199 @@ for user in session.query(User). \
 res = session.query(User).filter(text('id<:value and name=:name')). \
     params(value=224, name='fred').order_by(User.id).one()
 print(res)
+
+res = session.query(User).from_statement(
+    text('SELECT * FROM users WHERE name=:name')). \
+    params(name='ed').all()
+print(res)
+
+stmt = text('SELECT name, id, fullname, password FROM users WHERE name=:name')
+stmt = stmt.columns(User.name, User.id, User.fullname, User.password)
+res = session.query(User).from_statement(stmt).params(name='ed').all()
+print(res)
+
+# 不返回User, 返回单列
+stmt = text("SELECT name, id FROM users WHERE name=:name")
+stmt = stmt.columns(User.name, User.id)
+session.query(User.id, User.name).from_statement(stmt).params(name='ed').all()
+
+# ### Counting
+# count统计的是整个select的subquery
+# 如果是select内count使用func.count()
+res = session.query(User).filter(User.name.like('%ed')).count()
+print(res)
+
+# func.count()
+from sqlalchemy import func
+
+res = session.query(func.count(User.name), User.name).group_by(User.name).all()
+print(res)
+
+# count table
+res = session.query(func.count('*')).select_from(User).scalar()
+print(res)
+# 如果使用列名, select_from()可省
+session.query(func.count(User.id)).scalar()
+session.query(func.count(User.name)).scalar()
+
+# --- Building a Relationship
+from sqlalchemy import ForeignKey
+from sqlalchemy.orm import relationship
+
+
+class Address(Base):
+    __tablename__ = 'addresses'
+    id = Column(Integer, primary_key=True)
+    email_address = Column(String, nullable=False)
+    user_id = Column(Integer, ForeignKey('users.id'))
+    
+    user = relationship('User', back_populates='addresses')
+    
+    def __repr__(self):
+        return f'<Address(email_address={self.email_address})'
+
+
+# 外部定义relationship
+User.addresses = relationship('Address', order_by=Address.id, back_populates='user')
+
+# 创建Address表, 会跳过已创建的表
+Base.metadata.create_all(engine)
+
+# --- Working with Related Objects
+# collection的返回类型可以自定义, 默认是list
+# > http://docs.sqlalchemy.org/en/latest/orm/collections.html#custom-collections
+jack = User(name='jack', fullname='Jack Bean', password='gjffdd')
+print(jack.addresses)
+
+jack.addresses = [
+    Address(email_address='jack@google.com'),
+    Address(email_address='j25@yahoo.com'),
+]
+
+print(jack.addresses[1])
+
+print(jack.addresses[1].user)
+
+session.add(jack)
+session.commit()
+
+jack = session.query(User).filter_by(name='jack').one()
+
+print(jack)
+
+# 执行addresses表的SELECT, 返回list, lazy loading
+# > http://docs.sqlalchemy.org/en/latest/glossary.html#term-lazy-loading
+print(jack.addresses)
+
+# --- Querying with Joins
+# 不使用join, 但是等价
+for u, a in session.query(User, Address). \
+        filter(User.id == Address.user_id). \
+        filter(Address.email_address == 'jack@google.com').all():
+    print(u)
+    print(a)
+
+# join
+res = session.query(User).join(Address). \
+    filter(Address.email_address == 'jack@google.com').all()
+print(res)
+# multiple ForeignKey(多外键)
+query.join(Address, User.id == Address.user_id)  # explicit condition
+query.join(User.addresses)  # specify relationship from left to right
+query.join(Address, User.addresses)  # same, with explicit target
+query.join('addresses')  # same, using a string
+
+# outer join
+query.outerjoin(User.addresses)  # LEFT OUTER JOIN
+
+# 返回多Model时, 选择 from表 和 on表
+query = session.query(User, Address).select_from(Address).join(User)
+print(query)
+
+# ### Using Aliases
+from sqlalchemy.orm import aliased
+
+adalias1 = aliased(Address)
+adalias2 = aliased(Address)
+for username, email1, email2 in \
+        session.query(User.name, adalias1.email_address, adalias2.email_address). \
+                join(adalias1, User.addresses). \
+                join(adalias2, User.addresses). \
+                filter(adalias1.email_address == 'jack@google.com'). \
+                filter(adalias2.email_address == 'j25@yahoo.com'):
+    print(username, email1, email2)
+
+# ### Using Subqueries
+from sqlalchemy.sql import func
+
+# ?? 类似使用了alias() ??
+# shorthand for query.statement.alias()
+# statement
+stmt = session.query(Address.user_id, func.count('*'). \
+                     label('address_count')). \
+    group_by(Address.user_id).subquery()
+print(stmt)
+
+print('=== stmt.c')
+# 使用类似Table结构, 列叫 `c`
+for u, count in session.query(User, stmt.c.address_count). \
+        outerjoin(stmt, User.id == stmt.c.user_id).order_by(User.id):
+    print(u, count)
+
+# ### Selecting Entities from Subqueries
+stmt = session.query(Address). \
+    filter(Address.email_address != 'j25@yahoo.com'). \
+    subquery()
+# 子查询匹配到Model
+adalias = aliased(Address, stmt)
+for user, address in session.query(User, adalias). \
+        join(adalias, User.addresses):
+    print(user)
+    print(address)
+
+print('### Using EXISTS')
+from sqlalchemy.sql import exists
+
+# v1
+stmt = exists().where(Address.user_id == User.id)
+for name, in session.query(User.name).filter(stmt):
+    print(name)
+
+# v2 any()
+for name, in session.query(User.name). \
+        filter(User.addresses.any()):
+    print(name)
+
+# v3 any(条件) 在any内过滤
+for name, in session.query(User.name). \
+        filter(User.addresses.any(Address.email_address.like('%google%'))):
+    print(name)
+
+# v4 has(), 此处~ == NOT
+print(session.query(Address).
+      filter(~Address.user.has(User.name == 'jack')).all())
+
+print('### Common Relationship Operators')
+someaddress = Address()
+someuser = User()
+# __eq__()
+query.filter(Address.user == someuser)
+# __ne__()
+query.filter(Address.user != someuser)
+# IS NULL
+query.filter(Address.user == None)
+# contains()
+query.filter(User.addresses.contains(someaddress))
+# any()
+query.filter(User.addresses.any(Address.email_address == 'bar'))
+query.filter(User.addresses.any(email_address='bar'))
+# has()
+query.filter(Address.user.has(name='ed'))
+# Query.with_parent()
+session.query(Address).with_parent(someuser, 'addresses')
+
+print('--- Eager Loading')
+print('=================')
+
+
+
