@@ -294,6 +294,8 @@ class Address(Base):
 
 
 # 外部定义relationship
+# order_by字段会影响所有join方式(subqueryload, joinedload),
+# 手动的order_by不能用joinedload(因为表是匿名的), 只能用join
 User.addresses = relationship('Address', order_by=Address.id, back_populates='user')
 
 # 创建Address表, 会跳过已创建的表
@@ -432,8 +434,138 @@ query.filter(Address.user.has(name='ed'))
 # Query.with_parent()
 session.query(Address).with_parent(someuser, 'addresses')
 
+print('=================')
 print('--- Eager Loading')
 print('=================')
 
+print('### Subquery Load')
+from sqlalchemy.orm import subqueryload
+
+# 产生2个查询, User 和 User.id join Address
+jack = session.query(User). \
+    options(subqueryload(User.addresses)). \
+    filter_by(name='jack').one()
+print(jack)
+print(jack.addresses)
+
+print('### Joined Load')
+# LEFT OUTER JOIN
+# 1个查询, User join Address, 最正常的
+# return 2 rows, 但是Query会合并
+from sqlalchemy.orm import joinedload
+
+jack = session.query(User). \
+    options(joinedload(User.addresses)). \
+    filter_by(name='jack').one()
+print(jack)
+print(jack.addresses)
+
+# joinedload() & subqueryload()
+# joinedload() 适合多对一的关系
+# subqueryload() 适合查找相关的对象集合
+# subqueryload() tends to be more appropriate for loading related collections
+# while joinedload() tends to be better suited for many-to-one relationships,
+# due to the fact that only one row is loaded for both the lead and the related object.
+
+# joinedload() & join()
+# joinedload(), 匿名别称, 不影响query结果, order_by()和filter()不能使用其列
+
+# 这些load()主要是用来填充collection的, 也就是User.addresses的
+# join()是用来query查询(where字段)的
+# > http://docs.sqlalchemy.org/en/latest/orm/loading_relationships.html#zen-of-eager-loading
+
+print('### Explicit Join + Eagerload')
+# 适用与多对一的多端(?)
+from sqlalchemy.orm import contains_eager
+
+jack_addresses = session.query(Address). \
+    join(Address.user). \
+    filter(User.name == 'jack'). \
+    options(contains_eager(Address.user)). \
+    all()
+print(jack_addresses)
+print(jack_addresses[0].user)
+
+# > http://docs.sqlalchemy.org/en/latest/orm/loading_relationships.html
+
+print('============')
+print('--- Deleting')
+print('============')
+
+# > http://docs.sqlalchemy.org/en/latest/orm/cascades.html#unitofwork-cascades
+# > http://docs.sqlalchemy.org/en/latest/orm/collections.html#passive-deletes
+
+# Address没有删除2 rows, 只是Address.user_id = NULL
+session.delete(jack)
+print(session.query(User).filter_by(name='jack').count())
+
+print(session.query(Address).filter(Address.email_address.in_(['jack@google.com', 'j25@yahoo.com'])).count())
+
+print('### Configuring delete/delete-orphan Cascade')
+session.close()  # ROLLBACK
+
+Base = declarative_base()
 
 
+class User(Base):
+    __tablename__ = 'users'
+    
+    id = Column(Integer, primary_key=True)
+    name = Column(String)
+    fullname = Column(String)
+    password = Column(String)
+    
+    addresses = relationship('Address', back_populates='user',
+                             cascade='all, delete, delete-orphan')
+    
+    def __repr__(self):
+        return f'<User(name={self.name}, fullname={self.fullname}, password={self.password})>'
+
+
+class Address(Base):
+    __tablename__ = 'addresses'
+    
+    id = Column(Integer, primary_key=True)
+    email_address = Column(String, nullable=False)
+    user_id = Column(Integer, ForeignKey('users.id'))
+    
+    user = relationship('User', back_populates='addresses')
+    
+    def __repr__(self):
+        return f'<Address(email_address={self.email_address})>'
+
+
+jack = session.query(User).get(5)
+
+# 下行只执行select语句
+del jack.addresses[1]
+
+# 此处执行query时, 先执行上面的Delete
+print(session.query(Address).filter(
+    Address.email_address.in_(['jack@google.com', 'j25@yahoo.com'])).count())
+
+session.delete(jack)
+
+print(session.query(User).filter_by(name='jack').count())
+print(session.query(Address).filter(
+    Address.email_address.in_(['jack@google.com', 'j25@yahoo.com'])).count())
+
+print('========================================')
+print('--- Building a Many To Many Relationship')
+print('========================================')
+
+from sqlalchemy import Table, Text
+
+# association table
+post_keywords = Table('post_keywords', Base.metadata,
+                      Column('post_id', ForeignKey('posts.id'), primary_key=True),
+                      Column('keyword_id', ForeignKey('keywords.id'), primary_key=True))
+
+
+class BlogPost(Base):
+    __tablename__ = 'posts'
+    
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'))
+    headline = Column(String(255), nullable=False)
+    body = Column(Text)
